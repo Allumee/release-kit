@@ -1,0 +1,16 @@
+{
+  "description": "Refuses commands that change or remove published releases or shared history: gh release edit, upload or delete; force-pushes; deleting tags or remote refs.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

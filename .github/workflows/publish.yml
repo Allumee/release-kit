@@ -1,0 +1,113 @@
+name: Release kit · publish
+
+# Called by a project's release-publish.yml when a person publishes a release.
+# Uploads the release's own assets to the back office, moves the channel
+# pointer, and reads the result back. A rollback only moves the pointer.
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path of release.toml in the calling repo
+        type: string
+        default: release.toml
+      backoffice-url:
+        description: Back-office API base. Empty until the back office is live; then nothing is uploaded.
+        type: string
+        default: ""
+      audience:
+        description: Audience of the OIDC token sent to the back office
+        type: string
+        default: allumee-backoffice
+      rollback-to:
+        description: A version already stored; points stable back to it instead of publishing
+        type: string
+        default: ""
+
+jobs:
+  not-configured:
+    if: inputs.backoffice-url == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - run: echo "::notice::No back office is configured yet, so the release stays on GitHub only."
+
+  publish:
+    if: inputs.backoffice-url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: release-publish-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CONFIG: ${{ inputs.config }}
+      BACKOFFICE_URL: ${{ inputs.backoffice-url }}
+      AUDIENCE: ${{ inputs.audience }}
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Load the release kit
+        uses: Allumee/release-kit/actions/locate@v1
+
+      - name: Read release.toml
+        id: cfg
+        run: python3 -m release_kit read-config --config "$CONFIG" --github-output
+
+      - name: Roll back
+        if: inputs.rollback-to != ''
+        env:
+          VERSION: ${{ inputs.rollback-to }}
+        run: |
+          set -euo pipefail
+          python3 -m release_kit point --config "$CONFIG" --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" --channel stable --version "$VERSION"
+          python3 -m release_kit check-live --config "$CONFIG" --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" --channel stable --version "$VERSION"
+
+      - name: Download the release's assets and check them
+        if: inputs.rollback-to == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::error::not started by a published release; to roll back, pass rollback-to"
+            exit 1
+          fi
+          gh release download "$TAG" --dir dist --pattern '*.zip' --pattern SHA256SUMS
+          (cd dist && sha256sum --check SHA256SUMS)
+
+      - name: Upload, move the pointer, read it back
+        if: inputs.rollback-to == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          CHANNELS: ${{ steps.cfg.outputs.channels }}
+        run: |
+          set -euo pipefail
+          channel=stable
+          extra=()
+          if [ "$PRERELEASE" = "true" ]; then channel=testing; extra=(--prerelease); fi
+          case " $CHANNELS " in
+            *" $channel "*) ;;
+            *)
+              echo "::notice::$TAG stays on GitHub: release.toml has no $channel channel."
+              exit 0 ;;
+          esac
+          version="${TAG#v}"
+          zip="dist/$(awk '{print $2}' dist/SHA256SUMS)"
+          sha="$(awk '{print $1}' dist/SHA256SUMS)"
+          gh release view "$TAG" --json body --jq .body > dist/notes.md
+          python3 -m release_kit upload --config "$CONFIG" --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" \
+            --zip "$zip" --version "$version" --notes-file dist/notes.md "${extra[@]}"
+          python3 -m release_kit point --config "$CONFIG" --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" \
+            --channel "$channel" --version "$version"
+          python3 -m release_kit check-live --config "$CONFIG" --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" \
+            --channel "$channel" --version "$version" --sha256 "$sha"
+          echo "::notice::$version is live on the $channel channel."

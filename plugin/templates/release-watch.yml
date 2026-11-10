@@ -1,0 +1,18 @@
+name: Release watch
+
+# Weekly: fails, and GitHub emails, if the back office doesn't serve the
+# latest GitHub Release.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  watch:
+    uses: Allumee/release-kit/.github/workflows/watch.yml@v1
+    with:
+      backoffice-url: ""          # https://backoffice.allumee.com/api_v1 once the back office is live

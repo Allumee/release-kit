@@ -1,0 +1,17 @@
+name: Release kit
+description: Puts the release kit's Python package on PYTHONPATH for the job's later steps, at the kit version this action was fetched at.
+outputs:
+  path:
+    description: Folder that holds the release_kit package
+    value: ${{ steps.locate.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - id: locate
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        path="$(cd "$ACTION_PATH/../../plugin" && pwd)"
+        echo "path=$path" >> "$GITHUB_OUTPUT"
+        echo "PYTHONPATH=$path" >> "$GITHUB_ENV"

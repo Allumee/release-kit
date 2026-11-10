@@ -1,0 +1,24 @@
+name: Release publish
+
+# Runs when a person clicks Publish on a draft release: the same zip goes to
+# the back office. Run it by hand with rollback-to to point stable back to an
+# older version.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      rollback-to:
+        description: Version to point the stable channel back to, like 9.1.0
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    uses: Allumee/release-kit/.github/workflows/publish.yml@v1
+    with:
+      backoffice-url: ""          # https://backoffice.allumee.com/api_v1 once the back office is live
+      rollback-to: ${{ inputs.rollback-to || '' }}

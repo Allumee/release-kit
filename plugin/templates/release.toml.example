@@ -1,0 +1,37 @@
+# release.toml: what this project tells the Allumee release kit.
+# Full examples: examples/blender.release.toml and examples/tls.release.toml in the kit repo.
+
+product = "my-tool"                   # back-office product id: lowercase letters, digits, dashes
+zip_root = "MyTool"                   # the single top folder inside the zip
+artifact = "{zip_root}-{version}.zip" # optional; a file name ending in .zip, with {version} in it
+changelog = "CHANGELOG.md"            # "- vX.Y.Z" headings with indented "  - " items
+tests = ""                            # optional command run before the build, like "python -m pytest -q"
+python = "3.12"                       # Python used in CI
+public_version = false                # true only if installed copies poll the latest version
+channels = ["stable"]                 # add "testing" to also send pre-releases (vX.Y.Z-rc.N) to the back office
+
+[version]
+file = "my_tool/__init__.py"
+python = "__version__"                # or bl_info["version"]; or use regex = '...' with one group
+
+[files]
+# Patterns match paths from the repo root.
+#   "*.py"        top-level .py files only     "**/tests/"   every tests folder
+#   "my_tool/"    the whole folder             "**/*.md"     every Markdown file
+# Prefer whole folders: a new file then ships without anyone remembering it.
+include = ["my_tool/", "requirements.txt"]
+exclude = ["**/tests/", "**/docs/"]
+# rename = { "README.release.md" = "README.md" }
+# lfs = ["assets"]                    # paths whose Git LFS files must be pulled first
+max_mb = 100
+
+[smoke]
+# How CI proves the zip starts, before anyone can publish it.
+runner = "python"                     # "blender", "python" or "none"
+requirements = "requirements.txt"     # python: installed into a fresh virtual environment
+run = ["python -c 'import my_tool'"]  # python: run from inside the unpacked zip
+# runner = "blender"
+# blender = "5.2"                     # bpy version family
+# module = "MyAddon"                  # the add-on module to enable
+# check_attr = ""                     # optional module attribute that must be truthy once enabled
+timeout_min = 30

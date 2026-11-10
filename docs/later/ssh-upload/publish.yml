@@ -1,0 +1,109 @@
+name: Release kit · publish
+
+# Called by a project's release-publish.yml when a person publishes a release.
+# Sends the release's own zip to the release server over SSH, sets the
+# channel's version file, and reads both back. A rollback only sets the
+# version file, to a zip the server already holds.
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path of release.toml in the calling repo
+        type: string
+        default: release.toml
+      rollback-to:
+        description: A version the server already holds; stable points back to it instead of publishing
+        type: string
+        default: ""
+    secrets:
+      RELEASE_UPLOAD_KEY:
+        description: The SSH key the release server only lets run receive-release
+        required: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: release-publish-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      CONFIG: ${{ inputs.config }}
+      HAS_KEY: ${{ secrets.RELEASE_UPLOAD_KEY != '' }}
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Load the release kit
+        uses: Allumee/release-kit/actions/locate@v1
+
+      - name: Read release.toml
+        id: cfg
+        run: python3 -m release_kit read-config --config "$CONFIG" --github-output
+
+      - name: Stop here if the release server isn't set up
+        id: ready
+        env:
+          PUBLISH: ${{ steps.cfg.outputs.publish }}
+        run: |
+          if [ "$PUBLISH" != "true" ]; then
+            echo "::notice::release.toml has no [publish] section, so the release stays on GitHub only."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_KEY" != "true" ]; then
+            echo "::notice::No RELEASE_UPLOAD_KEY secret yet, so the release stays on GitHub only."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Roll back
+        if: steps.ready.outputs.ready == 'true' && inputs.rollback-to != ''
+        env:
+          RELEASE_UPLOAD_KEY: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          VERSION: ${{ inputs.rollback-to }}
+        run: |
+          set -euo pipefail
+          python3 -m release_kit point --config "$CONFIG" --channel stable --version "$VERSION"
+          python3 -m release_kit check-live --config "$CONFIG" --channel stable --version "$VERSION"
+          echo "::notice::stable points back to $VERSION."
+
+      - name: Download the release's assets and check them
+        if: steps.ready.outputs.ready == 'true' && inputs.rollback-to == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::error::not started by a published release; to roll back, pass rollback-to"
+            exit 1
+          fi
+          gh release download "$TAG" --dir dist --pattern '*.zip' --pattern SHA256SUMS
+          (cd dist && sha256sum --check SHA256SUMS)
+
+      - name: Upload, set the version file, read both back
+        if: steps.ready.outputs.ready == 'true' && inputs.rollback-to == ''
+        env:
+          RELEASE_UPLOAD_KEY: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          CHANNELS: ${{ steps.cfg.outputs.channels }}
+        run: |
+          set -euo pipefail
+          channel=stable
+          if [ "$PRERELEASE" = "true" ]; then channel=testing; fi
+          case " $CHANNELS " in
+            *" $channel "*) ;;
+            *) echo "::notice::release.toml has no $channel channel, so $TAG stays on GitHub only."; exit 0 ;;
+          esac
+          version="${TAG#v}"
+          zip="dist/$(awk '{print $2}' dist/SHA256SUMS)"
+          sha="$(awk '{print $1}' dist/SHA256SUMS)"
+          python3 -m release_kit upload --config "$CONFIG" --channel "$channel" --zip "$zip"
+          python3 -m release_kit point --config "$CONFIG" --channel "$channel" --version "$version"
+          python3 -m release_kit check-live --config "$CONFIG" --channel "$channel" --version "$version" --sha256 "$sha"
+          echo "::notice::$version is live on the $channel channel."

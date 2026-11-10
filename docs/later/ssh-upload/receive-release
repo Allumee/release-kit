@@ -1,0 +1,182 @@
+#!/bin/bash
+# receive-release: the only program a release upload key may run on the
+# release server (docs/later/ssh-upload/README.md). The key's authorized_keys line names
+# the folder of each channel it may write:
+#
+#   restrict,command="/usr/local/bin/receive-release stable=/srv/statics testing=/srv/testing" ssh-ed25519 AAAA... release-upload blender
+#
+# The client's request arrives in SSH_ORIGINAL_COMMAND, one of:
+#
+#   put CHANNEL FILE SHA256 SIZE   the zip on stdin; stored once, never replaced
+#   point CHANNEL VERSION FILE     write VERSION into CHANNEL's `release` file
+#   sha CHANNEL FILE               print "sha256 <hex>", or "missing"
+#   current CHANNEL                print "version <version>", or "none"
+#
+# Answers are one line on stdout; refusals go to stderr with a non-zero exit:
+# 2 bad request, 3 already stored with other bytes, 4 bytes don't match,
+# 5 zip not stored. Writes are logged to ~/receive-release.log.
+# Runs with bash 3.2 or later and coreutils; uses flock when it is installed.
+
+set -euo pipefail
+set -f
+umask 022
+
+MAX_BYTES=$((1024 * 1024 * 1024))
+LOG="${HOME:-/tmp}/receive-release.log"
+FILE_RE='^[A-Za-z0-9][A-Za-z0-9._+-]{0,150}\.zip$'
+SHA_RE='^[0-9a-f]{64}$'
+SIZE_RE='^[1-9][0-9]{0,11}$'
+VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$'
+FINAL_RE='^[0-9]+\.[0-9]+\.[0-9]+$'
+REQUEST_RE='^[A-Za-z0-9._+ -]+$'
+INCOMING=""
+
+trap 'if [ -n "$INCOMING" ]; then rm -f "$INCOMING"; fi' EXIT
+
+fail() {
+  local code="$1"
+  shift
+  echo "receive-release: $*" >&2
+  exit "$code"
+}
+
+log() {
+  local client="${SSH_CLIENT:-local}"
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${client%% *}" "$*" >>"$LOG" 2>/dev/null || true
+}
+
+lock() {
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$LOG.lock"
+    flock -w 120 9 || fail 1 "another upload is still running"
+  fi
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+channel_dir() {
+  local pair
+  for pair in "${CHANNELS[@]}"; do
+    if [ "${pair%%=*}" = "$1" ]; then
+      echo "${pair#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+do_put() {
+  local channel="$1" file="$2" sha="$3" size="$4" dir got
+  dir="$(channel_dir "$channel")" || fail 2 "unknown channel '$channel'"
+  [[ $file =~ $FILE_RE ]] || fail 2 "bad file name '$file'"
+  [[ $sha =~ $SHA_RE ]] || fail 2 "bad sha256"
+  [[ $size =~ $SIZE_RE ]] || fail 2 "bad size"
+  [ "$size" -le "$MAX_BYTES" ] || fail 2 "larger than $MAX_BYTES bytes"
+  lock
+  if [ -e "$dir/$file" ]; then
+    got="$(sha256_of "$dir/$file")"
+    [ "$got" = "$sha" ] || fail 3 "$file is already stored with other bytes; release a new version instead"
+    echo "exists $got"
+    return 0
+  fi
+  INCOMING="$dir/.incoming-$$-$file"
+  head -c "$((size + 1))" >"$INCOMING"
+  got="$(wc -c <"$INCOMING" | tr -d ' ')"
+  [ "$got" = "$size" ] || fail 4 "received $got bytes, expected $size"
+  got="$(sha256_of "$INCOMING")"
+  [ "$got" = "$sha" ] || fail 4 "received sha256 $got, expected $sha"
+  chmod 644 "$INCOMING"
+  # A hard link never replaces an existing file, so two uploads can't race.
+  ln "$INCOMING" "$dir/$file" 2>/dev/null || fail 3 "$file appeared during the upload; run it again"
+  rm -f "$INCOMING"
+  INCOMING=""
+  log "put $channel $file $sha $size"
+  echo "stored $sha"
+}
+
+do_point() {
+  local channel="$1" version="$2" file="$3" dir
+  dir="$(channel_dir "$channel")" || fail 2 "unknown channel '$channel'"
+  [[ $version =~ $VERSION_RE ]] || fail 2 "bad version '$version'"
+  [[ $file =~ $FILE_RE ]] || fail 2 "bad file name '$file'"
+  if [ "$channel" = "stable" ] && ! [[ $version =~ $FINAL_RE ]]; then
+    fail 2 "stable only takes final versions like 9.2.0: installed add-ons parse this file"
+  fi
+  case "$file" in
+    *[!0-9]"$version".zip) ;;
+    *) fail 2 "$file is not the zip of version $version" ;;
+  esac
+  [ -f "$dir/$file" ] || fail 5 "$file is not stored in $channel; upload it first"
+  lock
+  INCOMING="$dir/.release-$$"
+  printf '%s\n' "$version" >"$INCOMING"
+  chmod 644 "$INCOMING"
+  mv -f "$INCOMING" "$dir/release"
+  INCOMING=""
+  log "point $channel $version $file"
+  echo "pointed $channel $version"
+}
+
+do_sha() {
+  local dir
+  dir="$(channel_dir "$1")" || fail 2 "unknown channel '$1'"
+  [[ $2 =~ $FILE_RE ]] || fail 2 "bad file name '$2'"
+  if [ -f "$dir/$2" ]; then
+    echo "sha256 $(sha256_of "$dir/$2")"
+  else
+    echo "missing"
+  fi
+}
+
+do_current() {
+  local dir
+  dir="$(channel_dir "$1")" || fail 2 "unknown channel '$1'"
+  if [ -f "$dir/release" ]; then
+    echo "version $(head -c 64 "$dir/release" | tr -d '\r\n ')"
+  else
+    echo "none"
+  fi
+}
+
+[ "$#" -gt 0 ] || fail 2 "no channel folders configured in authorized_keys"
+CHANNELS=("$@")
+for pair in "${CHANNELS[@]}"; do
+  case "$pair" in
+    [a-z]*=/*) ;;
+    *) fail 2 "bad channel setting '$pair'; expected name=/absolute/folder" ;;
+  esac
+  [ -d "${pair#*=}" ] || fail 2 "channel folder ${pair#*=} does not exist"
+done
+
+REQUEST="${SSH_ORIGINAL_COMMAND:-}"
+[ "${#REQUEST}" -le 300 ] && [[ $REQUEST =~ $REQUEST_RE ]] ||
+  fail 2 "this key only takes put, point, sha and current requests"
+read -r VERB ARG1 ARG2 ARG3 ARG4 EXTRA <<<"$REQUEST" || true
+
+case "$VERB" in
+  put)
+    [ -n "$ARG4" ] && [ -z "$EXTRA" ] || fail 2 "usage: put CHANNEL FILE SHA256 SIZE"
+    do_put "$ARG1" "$ARG2" "$ARG3" "$ARG4"
+    ;;
+  point)
+    [ -n "$ARG3" ] && [ -z "$ARG4" ] || fail 2 "usage: point CHANNEL VERSION FILE"
+    do_point "$ARG1" "$ARG2" "$ARG3"
+    ;;
+  sha)
+    [ -n "$ARG2" ] && [ -z "$ARG3" ] || fail 2 "usage: sha CHANNEL FILE"
+    do_sha "$ARG1" "$ARG2"
+    ;;
+  current)
+    [ -n "$ARG1" ] && [ -z "$ARG2" ] || fail 2 "usage: current CHANNEL"
+    do_current "$ARG1"
+    ;;
+  *)
+    fail 2 "unknown request '$VERB'"
+    ;;
+esac

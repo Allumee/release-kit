@@ -1,0 +1,18 @@
+{
+  "name": "allumee-release-kit",
+  "description": "Allumee's release kit for Claude Code: release and onboarding skills, plus guard rails for published releases.",
+  "owner": {
+    "name": "Allumee"
+  },
+  "plugins": [
+    {
+      "name": "allumee-release",
+      "description": "/release and /release-onboard for repos that use the Allumee release kit, and a hook that refuses force-pushes, tag deletion and edits to published releases.",
+      "author": {
+        "name": "Allumee"
+      },
+      "source": "./plugin",
+      "category": "development"
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+name: Release kit · watch
+
+# Called weekly by a project's release-watch.yml. Fails, and GitHub emails,
+# when the zip stable gives out isn't byte for byte the GitHub Release of that
+# version. Warns when stable is behind the latest release, after a rollback or
+# a publish that didn't finish.
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path of release.toml in the calling repo
+        type: string
+        default: release.toml
+    secrets:
+      RELEASE_UPLOAD_KEY:
+        description: The SSH key the release server only lets run receive-release
+        required: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      CONFIG: ${{ inputs.config }}
+      HAS_KEY: ${{ secrets.RELEASE_UPLOAD_KEY != '' }}
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Load the release kit
+        uses: Allumee/release-kit/actions/locate@v1
+
+      - name: Read release.toml
+        id: cfg
+        run: python3 -m release_kit read-config --config "$CONFIG" --github-output
+
+      - name: Stop here if the release server isn't set up
+        id: ready
+        env:
+          PUBLISH: ${{ steps.cfg.outputs.publish }}
+        run: |
+          if [ "$PUBLISH" = "true" ] && [ "$HAS_KEY" = "true" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No release server set up for this repo yet; nothing to watch."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare stable with the GitHub Releases
+        if: steps.ready.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_UPLOAD_KEY: ${{ secrets.RELEASE_UPLOAD_KEY }}
+        run: |
+          set -euo pipefail
+          live="$(python3 -m release_kit live --config "$CONFIG" --channel stable | tail -n 1)"
+          version="$(jq -r .version <<<"$live")"
+          if [ -z "$version" ]; then
+            echo "::error::stable has no version file on the release server"
+            exit 1
+          fi
+          mkdir -p live
+          if ! gh release download "v$version" --pattern SHA256SUMS --dir live 2>/dev/null; then
+            echo "::warning::stable serves $version, which has no GitHub Release: it was published before the kit."
+            exit 0
+          fi
+          python3 -m release_kit check-live --config "$CONFIG" --channel stable --version "$version" \
+            --sha256 "$(awk '{print $1}' live/SHA256SUMS)"
+          latest="$(gh release view --json tagName --jq .tagName)"
+          if [ "v$version" != "$latest" ]; then
+            echo "::warning::stable serves $version; the latest release is $latest."
+          fi

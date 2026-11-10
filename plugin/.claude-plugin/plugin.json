@@ -1,0 +1,8 @@
+{
+  "name": "allumee-release",
+  "version": "1.0.0",
+  "description": "/release and /release-onboard for repos that use the Allumee release kit, and a hook that refuses force-pushes, tag deletion and edits to published releases.",
+  "author": {
+    "name": "Allumee"
+  }
+}

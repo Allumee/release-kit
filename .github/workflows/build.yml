@@ -1,0 +1,192 @@
+name: Release kit · build
+
+# Called by a project's release-build.yml on a v* tag, or by hand for a dry run.
+# A tag ends at a draft GitHub Release; a person's Publish click is the gate.
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path of release.toml in the calling repo
+        type: string
+        default: release.toml
+      token-source:
+        description: "How to read private submodules: broker (back office), app-secret (GitHub App key in the repo's secrets) or none"
+        type: string
+        default: broker
+      app-id:
+        description: The GitHub App's id, for token-source app-secret (pass vars.RELEASE_APP_ID)
+        type: string
+        default: ""
+      backoffice-url:
+        description: Back-office API base, for token-source broker
+        type: string
+        default: ""
+      audience:
+        description: Audience of the OIDC token sent to the back office
+        type: string
+        default: allumee-backoffice
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: The GitHub App's private key, for token-source app-secret only
+        required: false
+    outputs:
+      version:
+        description: The version built
+        value: ${{ jobs.build.outputs.version }}
+      sha256:
+        description: The zip's sha256
+        value: ${{ jobs.build.outputs.sha256 }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    env:
+      CONFIG: ${{ inputs.config }}
+      IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      HAS_APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Load the release kit
+        uses: Allumee/release-kit/actions/locate@v1
+
+      - name: Read release.toml
+        id: cfg
+        run: python3 -m release_kit read-config --config "$CONFIG" --github-output
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.cfg.outputs.python }}
+
+      - name: Check how this build reads private submodules
+        env:
+          SOURCE: ${{ inputs.token-source }}
+          APP_ID: ${{ inputs.app-id }}
+          BACKOFFICE_URL: ${{ inputs.backoffice-url }}
+        run: |
+          case "$SOURCE" in
+            broker)
+              [ -n "$BACKOFFICE_URL" ] || { echo "::error::token-source broker needs backoffice-url"; exit 1; } ;;
+            app-secret)
+              { [ -n "$APP_ID" ] && [ "$HAS_APP_KEY" = "true" ]; } ||
+                { echo "::error::token-source app-secret needs app-id and the RELEASE_APP_PRIVATE_KEY secret"; exit 1; } ;;
+            none) ;;
+            *)
+              echo "::error::unknown token-source '$SOURCE': use broker, app-secret or none"; exit 1 ;;
+          esac
+
+      - name: Get a read token from the back office
+        id: broker
+        if: inputs.token-source == 'broker'
+        env:
+          BACKOFFICE_URL: ${{ inputs.backoffice-url }}
+          AUDIENCE: ${{ inputs.audience }}
+        run: python -m release_kit github-token --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" --github-output
+
+      - name: Get a read token from the GitHub App
+        id: app
+        if: inputs.token-source == 'app-secret'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Check out submodules and Git LFS files
+        env:
+          TOKEN: ${{ steps.broker.outputs.token || steps.app.outputs.token || github.token }}
+          LFS_PATHS: ${{ steps.cfg.outputs.lfs }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          for path in $LFS_PATHS; do
+            if [ -e "$path/.git" ]; then
+              git -C "$path" lfs install --local
+              git -C "$path" lfs pull
+            else
+              git lfs install --local
+              git lfs pull --include="$path/**"
+            fi
+          done
+
+      - name: Check the tag against the version and the changelog
+        if: env.IS_TAG == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python -m release_kit check-tag --config "$CONFIG" --tag "$TAG"
+
+      - name: Run the project's tests
+        if: steps.cfg.outputs.tests != ''
+        env:
+          TESTS: ${{ steps.cfg.outputs.tests }}
+        run: bash -c "$TESTS"
+
+      - name: Build
+        id: build
+        env:
+          TAG: ${{ env.IS_TAG == 'true' && github.ref_name || '' }}
+        run: python -m release_kit build --config "$CONFIG" --out dist --tag "$TAG" --github-output
+
+      - name: Install the system libraries Blender's Python module loads
+        if: steps.cfg.outputs.runner == 'blender'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libxrender1 libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libsm6 libgl1 libegl1
+
+      - name: Install Blender's Python module for the smoke test
+        if: steps.cfg.outputs.runner == 'blender'
+        env:
+          BLENDER: ${{ steps.cfg.outputs.blender }}
+        run: python -m pip install --disable-pip-version-check "bpy==${BLENDER}.*" --extra-index-url https://download.blender.org/pypi/
+
+      - name: Verify the contents, then run the smoke test
+        env:
+          ZIP: ${{ steps.build.outputs.zip }}
+        run: python -m release_kit verify --config "$CONFIG" --zip "$ZIP"
+
+      - name: Keep the build for 14 days
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.cfg.outputs.product }}-${{ steps.build.outputs.version }}
+          path: dist/
+          retention-days: 14
+
+      - name: Write the release notes
+        if: env.IS_TAG == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python -m release_kit notes --config "$CONFIG" --tag "$TAG" --out dist/notes.md
+
+      - name: Create the draft GitHub Release
+        if: env.IS_TAG == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ZIP: ${{ steps.build.outputs.zip }}
+          PRERELEASE: ${{ steps.build.outputs.prerelease }}
+          TITLE: ${{ steps.cfg.outputs.product }} ${{ steps.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::a release for $TAG already exists; versions are never rebuilt, tag a new one"
+            exit 1
+          fi
+          flags=(--draft --verify-tag --title "$TITLE" --notes-file dist/notes.md)
+          if [ -n "$PRERELEASE" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" "$ZIP" dist/SHA256SUMS dist/MANIFEST.txt
+          echo "::notice::Draft release $TAG is ready. A person checks it and clicks Publish."

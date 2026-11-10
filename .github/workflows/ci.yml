@@ -1,0 +1,34 @@
+name: Kit tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        env:
+          PYTHONPATH: plugin
+        run: |
+          git config --global user.name "kit tests"
+          git config --global user.email "kit-tests@example.invalid"
+          python -m unittest discover -s tests -v
+      - name: The command line starts
+        env:
+          PYTHONPATH: plugin
+        run: python -m release_kit --help

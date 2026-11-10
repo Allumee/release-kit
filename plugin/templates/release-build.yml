@@ -1,0 +1,27 @@
+name: Release build
+
+# A v* tag builds, checks and drafts a GitHub Release. A manual run builds and
+# checks only, and keeps the zip as a 14-day artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    uses: Allumee/release-kit/.github/workflows/build.yml@v1
+    with:
+      # Until the back office hands out tokens, read private submodules with
+      # the GitHub App key stored in this repo's secrets:
+      token-source: app-secret
+      app-id: ${{ vars.RELEASE_APP_ID }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+    # Once the back office is live, replace the four lines above with:
+    #   token-source: broker
+    #   backoffice-url: https://backoffice.allumee.com/api_v1
+    # and delete both secrets. A repo without private submodules uses: token-source: none

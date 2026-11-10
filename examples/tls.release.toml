@@ -1,0 +1,50 @@
+# release.toml for Allumee/TLS (Takeoff Landing Scripts).
+# Goes at the repo root when TLS is onboarded (stage 5 of the kit plan).
+
+product = "tls"
+zip_root = "TLS"
+artifact = "TLS-{version}.zip"
+changelog = "CHANGELOG.md"
+python = "3.12"
+public_version = false                # no installed program asks for the latest TLS
+channels = ["stable"]                 # nobody tests TLS pre-releases yet: they stay on GitHub
+
+[version]
+file = "config/__init__.py"
+python = "__version__"                # "v18.2.0": the leading v is fine
+
+[files]
+# Whole folders and every top-level .py, so a new module such as phases.py
+# can't be left out the way deploy.sh left it out of 18.1.0.
+include = [
+  "*.py",
+  "algorithm/",
+  "config/",
+  "data/",
+  "music/",
+  "allumee_blender_binary/",
+  "README.release.md",
+  "requirements.txt",
+  "example.config.json",
+  "launch_guy.bat",
+  "launch_guy.sh",
+]
+exclude = [
+  "conftest.py",
+  "**/tests/",
+  "**/docs/",
+  "**/.vscode/",
+]
+rename = { "README.release.md" = "README.md" }
+max_mb = 60
+
+[smoke]
+runner = "python"
+requirements = "requirements.txt"
+# requirements.txt asks for jax[cuda12], several GB of CUDA wheels. Before
+# turning this on in CI, decide between a CPU constraints file or a larger runner.
+run = [
+  "python -c 'import tls'",
+  "python tls_manager.py --help",
+]
+timeout_min = 45

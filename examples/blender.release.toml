@@ -1,0 +1,47 @@
+# release.toml for Allumee/blender, the Blender add-on.
+# Goes at the repo root when the add-on is onboarded (stage 4 of the kit plan).
+
+product = "blender-addon"
+zip_root = "Allumee"                  # the module name Blender and project_runner load
+artifact = "Allumee-{version}.zip"    # the name installed add-ons and project_runner expect
+changelog = "CHANGELOG.md"
+tests = "bash scripts/run_scene_library_tests.sh --pure-only"
+python = "3.13"                       # the bpy 5.x wheels need CPython 3.13
+public_version = true                 # installed add-ons poll the latest version
+channels = ["stable", "testing"]      # vX.Y.Z-rc.N tags go to testing
+
+[version]
+file = "__init__.py"
+python = 'bl_info["version"]'
+
+[files]
+include = [
+  "*.py",
+  "objects/",
+  "utils/",
+  "panel/",
+  "loader/",
+  "image_to_drones/",
+  "blender_assets/*.blend",
+  "blender_assets/__init__.py",
+]
+exclude = [
+  "**/tests/",
+  "**/docs/",
+  "**/*.md",
+  "**/*.blend1",
+  "**/.flake8",
+  "**/.vscode/",
+  "dev.py",                           # developer helper, never registered by __init__.py
+  "install_optimized.py",             # an unused draft of install.py
+  "image_to_drones/scripts/",
+]
+lfs = ["blender_assets"]
+max_mb = 150
+
+[smoke]
+runner = "blender"
+blender = "5.2"
+module = "Allumee"
+check_attr = "DEPENDENCIES_READY"     # __init__.py sets it once its pip dependencies load
+timeout_min = 40                      # first enable installs 18 pinned packages

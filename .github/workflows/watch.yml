@@ -1,0 +1,55 @@
+name: Release kit · watch
+
+# Called weekly by a project's release-watch.yml. Fails, and GitHub emails,
+# when the back office's stable version is not the latest GitHub Release.
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path of release.toml in the calling repo
+        type: string
+        default: release.toml
+      backoffice-url:
+        description: Back-office API base. Empty until the back office is live.
+        type: string
+        default: ""
+      audience:
+        description: Audience of the OIDC token sent to the back office
+        type: string
+        default: allumee-backoffice
+
+jobs:
+  watch:
+    if: inputs.backoffice-url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CONFIG: ${{ inputs.config }}
+      BACKOFFICE_URL: ${{ inputs.backoffice-url }}
+      AUDIENCE: ${{ inputs.audience }}
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Load the release kit
+        uses: Allumee/release-kit/actions/locate@v1
+
+      - name: Compare the latest GitHub Release with the back office
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! tag="$(gh release view --json tagName --jq .tagName 2>/dev/null)"; then
+            echo "::notice::No published GitHub Release yet, so there is nothing to compare."
+            exit 0
+          fi
+          mkdir -p latest
+          gh release download "$tag" --pattern SHA256SUMS --dir latest
+          sha="$(awk '{print $1}' latest/SHA256SUMS)"
+          python3 -m release_kit check-live --config "$CONFIG" --backoffice "$BACKOFFICE_URL" --audience "$AUDIENCE" \
+            --channel stable --version "${tag#v}" --sha256 "$sha"
